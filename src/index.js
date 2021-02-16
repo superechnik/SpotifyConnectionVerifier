@@ -2,8 +2,18 @@ import './main.css';
 import { Elm } from './Main.elm';
 import * as serviceWorker from './serviceWorker';
 
-var flags = process.env.ELM_APP_API_URL;
-console.log(flags);
+const configs = 
+{
+  "apiUrl": process.env.ELM_APP_BASE_URI,
+  "attic": process.env.ELM_APP_ATTIC,
+  "kitchen": process.env.ELM_APP_KITCKEN,
+  "library": process.env.ELM_APP_LIBRARY,
+  "familyRoom": process.env.ELM_APP_FAMILYROOM,
+  "clienId": process.env.ELM_APP_CLIENT_ID,
+  "clientSecret": process.env.ELM_APP_CLIENT_SECRET,
+};
+
+var flags = JSON.stringify(configs);
 
 Elm.Main.init({
   node: document.getElementById('root'),
