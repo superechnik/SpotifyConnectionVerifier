@@ -51,7 +51,7 @@ configuration =
         Json.map UserInfo
             (Json.field "display_name" Json.string)
     , clientId =
-        "cfe2208fcad346cda755e6f65a7c171e"
+        ""
     , scope =
         []
     }
