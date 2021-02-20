@@ -13,14 +13,14 @@ const configs =
 };
 
 var bytes = localStorage.getItem("bytes");
-var flags = bytes.split(",").map(i => parseInt(i));
+var flags = bytes ? bytes.split(",").map(i => parseInt(i)) : null;
 
 const app = Elm.Main.init({
   node: document.getElementById('root'),
   flags: flags,
 });
 
-const a = app.ports.genRandomBytes.subscribe(n => {
+const _ = app.ports.genRandomBytes.subscribe(n => {
   const buffer = new Uint8Array(n);
   crypto.getRandomValues(buffer);
   const bytes = Array.from(buffer);

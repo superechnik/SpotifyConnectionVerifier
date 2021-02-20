@@ -12,7 +12,7 @@ import Html.Events exposing (..)
 import Http
 import Json.Decode as Json
 import OAuth
-import OAuth.AuthorizationCode as OAuth
+import OAuth.Implicit as OAuth
 import Url exposing (Protocol(..), Url)
 
 
@@ -20,7 +20,6 @@ main : Program (Maybe (List Int)) Model Msg
 main =
     application
         { init =
-            --pass flags to init
             Maybe.map convertBytes >> init
         , update =
             update
@@ -32,8 +31,8 @@ main =
             always NoOp
         , view =
             view
-                { title = "Auth0 - Flow: Authorization Code"
-                , btnClass = class "btn-auth0"
+                { title = "Spotify - Flow: Implicit"
+                , btnClass = class "btn-spotify"
                 }
         }
 
@@ -43,30 +42,23 @@ Note that this demo also fetches basic user information with the obtained access
 hence the user info endpoint and JSON decoder
 -}
 configuration : Configuration
-configuration =    
+configuration =
     { authorizationEndpoint =
         { defaultHttpsUrl | host = "accounts.spotify.com", path = "/authorize" }
-    , tokenEndpoint =
-        { defaultHttpsUrl | host = "accounts.spotify.com", path = "/api/token" }
     , userInfoEndpoint =
         { defaultHttpsUrl | host = "api.spotify.com", path = "/v1/me" }
     , userInfoDecoder =
-        Json.map2 UserInfo
-            (Json.field "name" Json.string)
-            (Json.field "picture" Json.string)
+        Json.map UserInfo
+            (Json.field "display_name" Json.string)
     , clientId =
         "cfe2208fcad346cda755e6f65a7c171e"
     , scope =
-        [  ]
+        []
     }
-
-
-
 
 --
 -- Model
 --
-
 
 type alias Model =
     { redirectUri : Url
@@ -83,15 +75,8 @@ type alias Model =
              |
              v
      +--------------+
-     |  Authorized  |
+     |  Authorized  | w/ Access Token
      +--------------+
-             |
-             | Exchange authorization code for an access token
-             |
-             v
-    +-----------------+
-    |  Authenticated  |
-    +-----------------+
              |
              | Fetch user info using the access token
              v
@@ -102,8 +87,7 @@ type alias Model =
 -}
 type Flow
     = Idle
-    | Authorized OAuth.AuthorizationCode
-    | Authenticated OAuth.Token
+    | Authorized OAuth.Token
     | Done UserInfo
     | Errored Error
 
@@ -111,20 +95,17 @@ type Flow
 type Error
     = ErrStateMismatch
     | ErrAuthorization OAuth.AuthorizationError
-    | ErrAuthentication OAuth.AuthenticationError
-    | ErrHTTPGetAccessToken
     | ErrHTTPGetUserInfo
 
 
 type alias UserInfo =
     { name : String
-    , picture : String
+ --   , picture : String
     }
 
 
 type alias Configuration =
     { authorizationEndpoint : Url
-    , tokenEndpoint : Url
     , userInfoEndpoint : Url
     , userInfoDecoder : Json.Decoder UserInfo
     , clientId : String
@@ -132,29 +113,24 @@ type alias Configuration =
     }
 
 
-
-
-
-
 {-| During the authentication flow, we'll run twice into the `init` function:
   - The first time, for the application very first run. And we proceed with the `Idle` state,
     waiting for the user (a.k.a you) to request a sign in.
   - The second time, after a sign in has been requested, the user is redirected to the
-    authorization server and redirects the user back to our application, with a code
-    and other fields as query parameters.
+    authorization server and redirects the user back to our application, with an access
+    token and other fields as query parameters.
 When query params are present (and valid), we consider the user `Authorized`.
 -}
-init : Maybe {state : String } -> Url -> Key -> ( Model, Cmd Msg )
+init : Maybe { state : String } -> Url -> Key -> ( Model, Cmd Msg )
 init mflags origin navigationKey =
     let
-
         redirectUri =
             { origin | query = Nothing, fragment = Nothing }
 
         clearUrl =
             Navigation.replaceUrl navigationKey (Url.toString redirectUri)
     in
-    case OAuth.parseCode origin of
+    case OAuth.parseToken origin of
         OAuth.Empty ->
             ( { flow = Idle, redirectUri = redirectUri }
             , Cmd.none
@@ -167,7 +143,7 @@ init mflags origin navigationKey =
         --
         -- We remember any previously generated state  state using the browser's local storage
         -- and give it back (if present) to the elm application upon start
-        OAuth.Success { code, state } ->
+        OAuth.Success { token, state } ->
             case mflags of
                 Nothing ->
                     ( { flow = Errored ErrStateMismatch, redirectUri = redirectUri }
@@ -181,11 +157,11 @@ init mflags origin navigationKey =
                         )
 
                     else
-                        ( { flow = Authorized code, redirectUri = redirectUri }
+                        ( { flow = Authorized token, redirectUri = redirectUri }
                         , Cmd.batch
                             -- Artificial delay to make the live demo easier to follow.
                             -- In practice, the access token could be requested right here.
-                            [ after 750 Millisecond AccessTokenRequested
+                            [ after 750 Millisecond UserInfoRequested
                             , clearUrl
                             ]
                         )
@@ -206,26 +182,12 @@ type Msg
     = NoOp
     | SignInRequested
     | GotRandomBytes (List Int)
-    | AccessTokenRequested
-    | GotAccessToken (Result Http.Error OAuth.AuthenticationSuccess)
+    | GotAccessToken (Result Http.Error OAuth.AuthorizationSuccess)
     | UserInfoRequested
     | GotUserInfo (Result Http.Error UserInfo)
     | SignOutRequested
 
 
-getAccessToken : Configuration -> Url -> OAuth.AuthorizationCode -> Cmd Msg
-getAccessToken { clientId, tokenEndpoint } redirectUri code =
-    Http.request <|
-        OAuth.makeTokenRequest GotAccessToken
-            { credentials =
-                { clientId = clientId
-                , secret = Nothing
-                }
-            , code = code
-            , url = tokenEndpoint
-            , redirectUri = redirectUri
-            }
-            
 getUserInfo : Configuration -> OAuth.Token -> Cmd Msg
 getUserInfo { userInfoDecoder, userInfoEndpoint } token =
     Http.request
@@ -246,7 +208,7 @@ getUserInfo { userInfoDecoder, userInfoEndpoint } token =
      crypto.getRandomValues(buffer);
      const bytes = Array.from(buffer);
      localStorage.setItem("bytes", bytes);
-    app.ports.randomBytes.send(bytes);
+     app.ports.randomBytes.send(bytes);
    });
 -}
 
@@ -256,7 +218,7 @@ port genRandomBytes : Int -> Cmd msg
 
 port randomBytes : (List Int -> msg) -> Sub msg
 
-
+port clientIdentifier : String -> Cmd msg
 
 --
 -- Update
@@ -272,16 +234,10 @@ update msg model =
         ( Idle, GotRandomBytes bytes ) ->
             gotRandomBytes model bytes
 
-        ( Authorized code, AccessTokenRequested ) ->
-            accessTokenRequested model code
-
-        ( Authorized _, GotAccessToken authenticationResponse ) ->
-            gotAccessToken model authenticationResponse
-
-        ( Authenticated token, UserInfoRequested ) ->
+        ( Authorized token, UserInfoRequested ) ->
             userInfoRequested model token
 
-        ( Authenticated _, GotUserInfo userInfoResponse ) ->
+        ( Authorized _, GotUserInfo userInfoResponse ) ->
             gotUserInfo model userInfoResponse
 
         ( Done _, SignOutRequested ) ->
@@ -316,52 +272,18 @@ gotRandomBytes model bytes =
             , state = Just state
             , url = configuration.authorizationEndpoint
             }
-        
     in
     ( { model | flow = Idle }
     , authorization
         |> OAuth.makeAuthorizationUrl
         |> Url.toString
-        |> Navigation.load    
+        |> Navigation.load
     )
---log this OAth
-
-accessTokenRequested : Model -> OAuth.AuthorizationCode -> ( Model, Cmd Msg )
-accessTokenRequested model code =
-    ( { model | flow = Authorized code }
-    , getAccessToken configuration model.redirectUri code
-    )
-
-
-gotAccessToken : Model -> Result Http.Error OAuth.AuthenticationSuccess -> ( Model, Cmd Msg )
-gotAccessToken model authenticationResponse =
-    case authenticationResponse of
-        Err (Http.BadBody body) ->
-            case Json.decodeString OAuth.defaultAuthenticationErrorDecoder body of
-                Ok error ->
-                    ( { model | flow = Errored <| ErrAuthentication error }
-                    , Cmd.none
-                    )
-
-                _ ->
-                    ( { model | flow = Errored ErrHTTPGetAccessToken }
-                    , Cmd.none
-                    )
-
-        Err _ ->
-            ( { model | flow = Errored ErrHTTPGetAccessToken }
-            , Cmd.none
-            )
-
-        Ok { token } ->
-            ( { model | flow = Authenticated token }
-            , after 750 Millisecond UserInfoRequested
-            )
 
 
 userInfoRequested : Model -> OAuth.Token -> ( Model, Cmd Msg )
 userInfoRequested model token =
-    ( { model | flow = Authenticated token }
+    ( { model | flow = Authorized token }
     , getUserInfo configuration token
     )
 
@@ -414,8 +336,6 @@ viewBody config model =
                 div [ class "flex" ]
                     [ viewAuthorizationStep False
                     , viewStepSeparator False
-                    , viewAuthenticationStep False
-                    , viewStepSeparator False
                     , viewGetUserInfoStep False
                     ]
                     :: viewIdle config
@@ -424,27 +344,13 @@ viewBody config model =
                 div [ class "flex" ]
                     [ viewAuthorizationStep True
                     , viewStepSeparator True
-                    , viewAuthenticationStep False
-                    , viewStepSeparator False
                     , viewGetUserInfoStep False
                     ]
                     :: viewAuthorized
 
-            Authenticated _ ->
-                div [ class "flex" ]
-                    [ viewAuthorizationStep True
-                    , viewStepSeparator True
-                    , viewAuthenticationStep True
-                    , viewStepSeparator True
-                    , viewGetUserInfoStep False
-                    ]
-                    :: viewAuthenticated
-
             Done userInfo ->
                 div [ class "flex" ]
                     [ viewAuthorizationStep True
-                    , viewStepSeparator True
-                    , viewAuthenticationStep True
                     , viewStepSeparator True
                     , viewGetUserInfoStep True
                     ]
@@ -468,21 +374,14 @@ viewIdle { btnClass } =
 
 viewAuthorized : List (Html Msg)
 viewAuthorized =
-    [ span [] [ text "Authenticating..." ]
-    ]
-
-
-viewAuthenticated : List (Html Msg)
-viewAuthenticated =
     [ span [] [ text "Getting user info..." ]
     ]
 
 
 viewUserInfo : ViewConfiguration Msg -> UserInfo -> List (Html Msg)
-viewUserInfo { btnClass } { name, picture } =
+viewUserInfo { btnClass } { name } =
     [ div [ class "flex", class "flex-column" ]
-        [ img [ class "avatar", src picture ] []
-        , p [] [ text name ]
+        [ p [] [ text name ]
         , div []
             [ button
                 [ onClick SignOutRequested, btnClass ]
@@ -507,12 +406,6 @@ viewError e =
             ErrAuthorization error ->
                 oauthErrorToString { error = error.error, errorDescription = error.errorDescription }
 
-            ErrAuthentication error ->
-                oauthErrorToString { error = error.error, errorDescription = error.errorDescription }
-
-            ErrHTTPGetAccessToken ->
-                "Unable to retrieve token: HTTP request failed. CORS is likely disabled on the authorization server."
-
             ErrHTTPGetUserInfo ->
                 "Unable to retrieve user info: HTTP request failed."
 
@@ -520,11 +413,6 @@ viewError e =
 viewAuthorizationStep : Bool -> Html Msg
 viewAuthorizationStep isActive =
     viewStep isActive ( "Authorization", style "left" "-110%" )
-
-
-viewAuthenticationStep : Bool -> Html Msg
-viewAuthenticationStep isActive =
-    viewStep isActive ( "Authentication", style "left" "-125%" )
 
 
 viewGetUserInfoStep : Bool -> Html Msg
