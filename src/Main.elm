@@ -15,9 +15,14 @@ import OAuth
 import OAuth.Implicit as OAuth
 import Url exposing (Protocol(..), Url)
 
+type alias FlagObject = 
+    Maybe (List Int)
+    
 
-main : Program (Maybe (List Int)) Model Msg
+main : Program FlagObject Model Msg
 main =
+    let _ = Debug.log "main" "ooh"
+    in
     application
         { init =
             Maybe.map convertBytes >> init
@@ -51,7 +56,7 @@ configuration =
         Json.map UserInfo
             (Json.field "display_name" Json.string)
     , clientId =
-        ""
+        "cfe2208fcad346cda755e6f65a7c171e"
     , scope =
         []
     }
@@ -124,6 +129,8 @@ When query params are present (and valid), we consider the user `Authorized`.
 init : Maybe { state : String } -> Url -> Key -> ( Model, Cmd Msg )
 init mflags origin navigationKey =
     let
+        _ = Debug.log "init" "im in init"
+
         redirectUri =
             { origin | query = Nothing, fragment = Nothing }
 
