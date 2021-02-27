@@ -6,6 +6,7 @@ github with little alteration
 
 port module Main exposing (main)
 
+
 import Base64.Encode as Base64
 import Browser exposing (Document, application)
 import Browser.Navigation as Navigation exposing (Key)
@@ -83,11 +84,7 @@ decodeDeviceList =
 
 getDeviceList : Decoder (List AccountPlayer)
 getDeviceList = 
-    Json.Decode.at ["devices"] (Json.Decode.list decodeDeviceList)
-
---object is { devices: []}
--- Json.map x (field "devices" list)
-
+    Json.Decode.at ["devices"]  (Json.Decode.list decodeDeviceList)
 
 --
 -- Model
@@ -460,7 +457,7 @@ viewAccountPlayerInfo : ViewConfiguration Msg -> (List AccountPlayer) -> List (H
 viewAccountPlayerInfo {btnClass } ls = 
     [ div [class "flex", class "flex-column"]
         [ul []
-        (List.map (\l -> li [] [text l.name ]) ls)
+        (List.map (\l -> li [] [(text l.id),(text ", "),(text l.name),(text ", "),(text (boolToString l.is_active)) ]) ls)
         , div []
         [ button
                 [ onClick SignOutRequested, btnClass ]
@@ -548,6 +545,11 @@ viewStepSeparator isActive =
 -- Helpers
 --
 
+boolToString : Bool -> String
+boolToString input = 
+    if input == True 
+        then "True"
+        else "False"
 
 toBytes : List Int -> Bytes
 toBytes =
