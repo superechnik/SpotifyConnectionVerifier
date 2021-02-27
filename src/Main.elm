@@ -1,3 +1,9 @@
+{-
+the majority of the auth code in this file 
+was pulled off the oath2 package demo
+github with little alteration
+-}
+
 port module Main exposing (main)
 
 import Base64.Encode as Base64
@@ -14,15 +20,15 @@ import Json.Decode as Json
 import OAuth
 import OAuth.Implicit as OAuth
 import Url exposing (Protocol(..), Url)
+import Json.Decode exposing (Decoder)
+import Json.Decode exposing (map7)
+import Bytes.Decode exposing (decode)
 
 type alias FlagObject = 
     Maybe (List Int)
-    
 
 main : Program FlagObject Model Msg
 main =
-    let _ = Debug.log "main" "ooh"
-    in
     application
         { init =
             Maybe.map convertBytes >> init
@@ -36,30 +42,52 @@ main =
             always NoOp
         , view =
             view
-                { title = "Spotify - Flow: Implicit"
-                , btnClass = class "btn-spotify"
+                { title = "SpotifyConnectionVerifier"
+                , btnClass = class "CTA__secondary--FVl7a"
                 }
         }
 
 
-{-| OAuth configuration.
-Note that this demo also fetches basic user information with the obtained access token,
-hence the user info endpoint and JSON decoder
--}
 configuration : Configuration
 configuration =
     { authorizationEndpoint =
         { defaultHttpsUrl | host = "accounts.spotify.com", path = "/authorize" }
     , userInfoEndpoint =
         { defaultHttpsUrl | host = "api.spotify.com", path = "/v1/me" }
+    , accountPlayerEndpoint = 
+        { defaultHttpsUrl | host = "api.spotify.com", path = "/v1/me/player/devices" }
+    , accountPlayerDecoder = 
+        getDeviceList      
     , userInfoDecoder =
-        Json.map UserInfo
-            (Json.field "display_name" Json.string)
+       Json.map UserInfo
+            (Json.field "display_name" Json.string) 
     , clientId =
         "cfe2208fcad346cda755e6f65a7c171e"
     , scope =
-        []
+        ["user-read-playback-state"]
     }
+
+--decode device list
+decodeDeviceList : Decoder AccountPlayer
+decodeDeviceList = 
+    Json.map7 
+    AccountPlayer
+        (Json.Decode.at ["id"] Json.string) 
+        (Json.Decode.at ["is_active"] Json.bool)
+        (Json.Decode.at ["is_private_session"] Json.bool)
+        (Json.Decode.at ["is_restricted"] Json.bool)
+        (Json.Decode.at ["name"] Json.string)
+        (Json.Decode.at ["type"] Json.string)
+        (Json.Decode.at ["volume_percent"] Json.int)
+
+
+getDeviceList : Decoder (List AccountPlayer)
+getDeviceList = 
+    Json.Decode.at ["devices"] (Json.Decode.list decodeDeviceList)
+
+--object is { devices: []}
+-- Json.map x (field "devices" list)
+
 
 --
 -- Model
@@ -70,30 +98,11 @@ type alias Model =
     , flow : Flow
     }
 
-
-{-| This demo evolves around the following state-machine\*
-        +--------+
-        |  Idle  |
-        +--------+
-             |
-             | Redirect user for authorization
-             |
-             v
-     +--------------+
-     |  Authorized  | w/ Access Token
-     +--------------+
-             |
-             | Fetch user info using the access token
-             v
-         +--------+
-         |  Done  |
-         +--------+
-(\*) The 'Errored' state hasn't been represented here for simplicity.
--}
 type Flow
     = Idle
     | Authorized OAuth.Token
     | Done UserInfo
+    | GotPlayers (List AccountPlayer)
     | Errored Error
 
 
@@ -101,18 +110,30 @@ type Error
     = ErrStateMismatch
     | ErrAuthorization OAuth.AuthorizationError
     | ErrHTTPGetUserInfo
+    | ErrHTTPGetAccountPlayerInfo
 
 
 type alias UserInfo =
-    { name : String
- --   , picture : String
+    { name : String}
+
+type alias AccountPlayer = 
+    {id: String
+    ,is_active: Bool
+    ,is_private_session: Bool 
+    ,is_restricted: Bool 
+    ,name: String 
+    ,playerType: String 
+    ,volume_percent: Int
     }
+
 
 
 type alias Configuration =
     { authorizationEndpoint : Url
     , userInfoEndpoint : Url
     , userInfoDecoder : Json.Decoder UserInfo
+    , accountPlayerEndpoint : Url 
+    , accountPlayerDecoder : Json.Decoder (List AccountPlayer)
     , clientId : String
     , scope : List String
     }
@@ -129,8 +150,6 @@ When query params are present (and valid), we consider the user `Authorized`.
 init : Maybe { state : String } -> Url -> Key -> ( Model, Cmd Msg )
 init mflags origin navigationKey =
     let
-        _ = Debug.log "init" "im in init"
-
         redirectUri =
             { origin | query = Nothing, fragment = Nothing }
 
@@ -168,7 +187,7 @@ init mflags origin navigationKey =
                         , Cmd.batch
                             -- Artificial delay to make the live demo easier to follow.
                             -- In practice, the access token could be requested right here.
-                            [ after 750 Millisecond UserInfoRequested
+                            [ after 0 Millisecond AccountPlayerInfoRequested--UserInfoRequested
                             , clearUrl
                             ]
                         )
@@ -191,7 +210,9 @@ type Msg
     | GotRandomBytes (List Int)
     | GotAccessToken (Result Http.Error OAuth.AuthorizationSuccess)
     | UserInfoRequested
+    | AccountPlayerInfoRequested
     | GotUserInfo (Result Http.Error UserInfo)
+    | GotAccountPlayerInfo (Result Http.Error (List AccountPlayer))
     | SignOutRequested
 
 
@@ -207,17 +228,18 @@ getUserInfo { userInfoDecoder, userInfoEndpoint } token =
         , tracker = Nothing
         }
 
+getAccountPlayers : Configuration -> OAuth.Token -> Cmd Msg
+getAccountPlayers {accountPlayerDecoder, accountPlayerEndpoint} token = 
+    Http.request 
+        { method = "GET"
+        , body = Http.emptyBody 
+        , headers = OAuth.useToken token []
+        , url = Url.toString accountPlayerEndpoint
+        , expect = Http.expectJson GotAccountPlayerInfo accountPlayerDecoder 
+        , timeout = Nothing
+        , tracker = Nothing
+        }
 
-
-{- On the JavaScript's side, we have:
-   app.ports.genRandomBytes.subscribe(n => {
-     const buffer = new Uint8Array(n);
-     crypto.getRandomValues(buffer);
-     const bytes = Array.from(buffer);
-     localStorage.setItem("bytes", bytes);
-     app.ports.randomBytes.send(bytes);
-   });
--}
 
 
 port genRandomBytes : Int -> Cmd msg
@@ -244,8 +266,14 @@ update msg model =
         ( Authorized token, UserInfoRequested ) ->
             userInfoRequested model token
 
+        ( Authorized token, AccountPlayerInfoRequested) ->
+            accountPlayerInfoRequested model token    
+
         ( Authorized _, GotUserInfo userInfoResponse ) ->
             gotUserInfo model userInfoResponse
+
+        ( Authorized _, GotAccountPlayerInfo accountPlayerResponse) ->
+            gotAccountPlayerInfo model accountPlayerResponse
 
         ( Done _, SignOutRequested ) ->
             signOutRequested model
@@ -294,6 +322,12 @@ userInfoRequested model token =
     , getUserInfo configuration token
     )
 
+accountPlayerInfoRequested : Model -> OAuth.Token -> (Model, Cmd Msg)
+accountPlayerInfoRequested model token = 
+    ( {model | flow = Authorized token}
+    , getAccountPlayers configuration token
+    )
+
 
 gotUserInfo : Model -> Result Http.Error UserInfo -> ( Model, Cmd Msg )
 gotUserInfo model userInfoResponse =
@@ -305,6 +339,23 @@ gotUserInfo model userInfoResponse =
 
         Ok userInfo ->
             ( { model | flow = Done userInfo }
+            , Cmd.none
+            )
+
+gotAccountPlayerInfo : Model -> Result Http.Error (List AccountPlayer) -> (Model, Cmd Msg)
+gotAccountPlayerInfo model accountPlayerResponse = 
+    let
+        _ = Debug.log "getPlayersResponse" accountPlayerResponse 
+        
+    in
+    case accountPlayerResponse of 
+        Err _ -> 
+            (
+                { model | flow = Errored ErrHTTPGetAccountPlayerInfo }
+                , Cmd.none
+            )
+        Ok accountPlayer ->
+            ({ model | flow = GotPlayers accountPlayer }
             , Cmd.none
             )
 
@@ -337,7 +388,7 @@ view ({ title } as config) model =
 
 viewBody : ViewConfiguration Msg -> Model -> List (Html Msg)
 viewBody config model =
-    [ div [ class "flex", class "flex-column", class "flex-space-around" ] <|
+    [ div [ class "flex", class "flex-column", class "flex-space-around"] <|
         case model.flow of
             Idle ->
                 div [ class "flex" ]
@@ -363,6 +414,14 @@ viewBody config model =
                     ]
                     :: viewUserInfo config userInfo
 
+            GotPlayers accountPlayerInfo ->
+                div [ class "flex"]
+                    [ viewAuthorizationStep True
+                    , viewStepSeparator True 
+                    , viewGetAccountPlayerInfoStep True 
+                    ]
+                    :: viewAccountPlayerInfo config accountPlayerInfo
+
             Errored err ->
                 div [ class "flex" ]
                     [ viewErroredStep
@@ -373,7 +432,7 @@ viewBody config model =
 
 viewIdle : ViewConfiguration Msg -> List (Html Msg)
 viewIdle { btnClass } =
-    [ button
+    [ button 
         [ onClick SignInRequested, btnClass ]
         [ text "Sign in" ]
     ]
@@ -391,6 +450,19 @@ viewUserInfo { btnClass } { name } =
         [ p [] [ text name ]
         , div []
             [ button
+                [ onClick SignOutRequested, btnClass ]
+                [ text "Sign out" ]
+            ]
+        ]
+    ]
+
+viewAccountPlayerInfo : ViewConfiguration Msg -> (List AccountPlayer) -> List (Html Msg)
+viewAccountPlayerInfo {btnClass } ls = 
+    [ div [class "flex", class "flex-column"]
+        [ul []
+        (List.map (\l -> li [] [text l.name ]) ls)
+        , div []
+        [ button
                 [ onClick SignOutRequested, btnClass ]
                 [ text "Sign out" ]
             ]
@@ -416,6 +488,9 @@ viewError e =
             ErrHTTPGetUserInfo ->
                 "Unable to retrieve user info: HTTP request failed."
 
+            ErrHTTPGetAccountPlayerInfo ->
+                "Unable to retrive account player info: HTTP request failed."
+
 
 viewAuthorizationStep : Bool -> Html Msg
 viewAuthorizationStep isActive =
@@ -425,6 +500,10 @@ viewAuthorizationStep isActive =
 viewGetUserInfoStep : Bool -> Html Msg
 viewGetUserInfoStep isActive =
     viewStep isActive ( "Get User Info", style "left" "-135%" )
+
+viewGetAccountPlayerInfoStep : Bool -> Html Msg 
+viewGetAccountPlayerInfoStep isActive = 
+    viewStep isActive ("Get Account Play Info", style "left" "-135%")
 
 
 viewErroredStep : Html Msg
