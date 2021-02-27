@@ -2,14 +2,6 @@ import './main.css';
 import { Elm } from './Main.elm';
 import * as serviceWorker from './serviceWorker';
 
-const configs =
-{
-  "apiUrl": process.env.ELM_APP_BASE_URI,
-  "attic": process.env.ELM_APP_ATTIC,
-  "kitchen": process.env.ELM_APP_KITCKEN,
-  "library": process.env.ELM_APP_LIBRARY,
-  "familyRoom": process.env.ELM_APP_FAMILYROOM,
-  };
 
 var bytes = localStorage.getItem("bytes");
 var flags = bytes ? bytes.split(",").map(i => parseInt(i)) : null;
@@ -26,7 +18,6 @@ const _ = app.ports.genRandomBytes.subscribe(n => {
   localStorage.setItem("bytes", bytes);
   app.ports.randomBytes.send(bytes);
 });
-
 
 
 // If you want your app to work offline and load faster, you can change
