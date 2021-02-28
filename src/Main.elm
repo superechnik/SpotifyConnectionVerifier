@@ -10,8 +10,6 @@ port module Main exposing (main)
 import Base64.Encode as Base64
 import Browser exposing (Document, application)
 import Browser.Navigation as Navigation exposing (Key)
-import Bytes exposing (Bytes)
-import Bytes.Encode as Bytes
 import Delay exposing (TimeUnit(..), after)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -23,7 +21,7 @@ import OAuth.Implicit as OAuth
 import Url exposing (Protocol(..), Url)
 import Json.Decode exposing (Decoder)
 import Json.Decode exposing (map7)
-import Bytes.Decode exposing (decode)
+import Helpers exposing (..) 
 
 type alias FlagObject = 
     Maybe (List Int)
@@ -53,22 +51,17 @@ configuration : Configuration
 configuration =
     { authorizationEndpoint =
         { defaultHttpsUrl | host = "accounts.spotify.com", path = "/authorize" }
-    , userInfoEndpoint =
-        { defaultHttpsUrl | host = "api.spotify.com", path = "/v1/me" }
     , accountPlayerEndpoint = 
         { defaultHttpsUrl | host = "api.spotify.com", path = "/v1/me/player/devices" }
     , accountPlayerDecoder = 
         getDeviceList      
-    , userInfoDecoder =
-       Json.map UserInfo
-            (Json.field "display_name" Json.string) 
     , clientId =
         "cfe2208fcad346cda755e6f65a7c171e"
     , scope =
         ["user-read-playback-state"]
     }
 
---decode device list
+--decoder for spotify devices
 decodeDeviceList : Decoder AccountPlayer
 decodeDeviceList = 
     Json.map7 
@@ -80,6 +73,7 @@ decodeDeviceList =
         (Json.Decode.at ["name"] Json.string)
         (Json.Decode.at ["type"] Json.string)
         (Json.Decode.at ["volume_percent"] Json.int)
+
 
 
 getDeviceList : Decoder (List AccountPlayer)
@@ -98,15 +92,13 @@ type alias Model =
 type Flow
     = Idle
     | Authorized OAuth.Token
-    | Done UserInfo
-    | GotPlayers (List AccountPlayer)
+    | Done (List AccountPlayer)
     | Errored Error
 
 
 type Error
     = ErrStateMismatch
     | ErrAuthorization OAuth.AuthorizationError
-    | ErrHTTPGetUserInfo
     | ErrHTTPGetAccountPlayerInfo
 
 
@@ -127,23 +119,12 @@ type alias AccountPlayer =
 
 type alias Configuration =
     { authorizationEndpoint : Url
-    , userInfoEndpoint : Url
-    , userInfoDecoder : Json.Decoder UserInfo
     , accountPlayerEndpoint : Url 
     , accountPlayerDecoder : Json.Decoder (List AccountPlayer)
     , clientId : String
     , scope : List String
     }
 
-
-{-| During the authentication flow, we'll run twice into the `init` function:
-  - The first time, for the application very first run. And we proceed with the `Idle` state,
-    waiting for the user (a.k.a you) to request a sign in.
-  - The second time, after a sign in has been requested, the user is redirected to the
-    authorization server and redirects the user back to our application, with an access
-    token and other fields as query parameters.
-When query params are present (and valid), we consider the user `Authorized`.
--}
 init : Maybe { state : String } -> Url -> Key -> ( Model, Cmd Msg )
 init mflags origin navigationKey =
     let
@@ -159,13 +140,6 @@ init mflags origin navigationKey =
             , Cmd.none
             )
 
-        -- It is important to set a `state` when making the authorization request
-        -- and to verify it after the redirection. The state can be anything but its primary
-        -- usage is to prevent cross-site request forgery; at minima, it should be a short,
-        -- non-guessable string, generated on the fly.
-        --
-        -- We remember any previously generated state  state using the browser's local storage
-        -- and give it back (if present) to the elm application upon start
         OAuth.Success { token, state } ->
             case mflags of
                 Nothing ->
@@ -182,9 +156,7 @@ init mflags origin navigationKey =
                     else
                         ( { flow = Authorized token, redirectUri = redirectUri }
                         , Cmd.batch
-                            -- Artificial delay to make the live demo easier to follow.
-                            -- In practice, the access token could be requested right here.
-                            [ after 0 Millisecond AccountPlayerInfoRequested--UserInfoRequested
+                            [ after 0 Millisecond AccountPlayerInfoRequested
                             , clearUrl
                             ]
                         )
@@ -205,25 +177,9 @@ type Msg
     = NoOp
     | SignInRequested
     | GotRandomBytes (List Int)
-    | GotAccessToken (Result Http.Error OAuth.AuthorizationSuccess)
-    | UserInfoRequested
     | AccountPlayerInfoRequested
-    | GotUserInfo (Result Http.Error UserInfo)
     | GotAccountPlayerInfo (Result Http.Error (List AccountPlayer))
     | SignOutRequested
-
-
-getUserInfo : Configuration -> OAuth.Token -> Cmd Msg
-getUserInfo { userInfoDecoder, userInfoEndpoint } token =
-    Http.request
-        { method = "GET"
-        , body = Http.emptyBody
-        , headers = OAuth.useToken token []
-        , url = Url.toString userInfoEndpoint
-        , expect = Http.expectJson GotUserInfo userInfoDecoder
-        , timeout = Nothing
-        , tracker = Nothing
-        }
 
 getAccountPlayers : Configuration -> OAuth.Token -> Cmd Msg
 getAccountPlayers {accountPlayerDecoder, accountPlayerEndpoint} token = 
@@ -240,11 +196,7 @@ getAccountPlayers {accountPlayerDecoder, accountPlayerEndpoint} token =
 
 
 port genRandomBytes : Int -> Cmd msg
-
-
 port randomBytes : (List Int -> msg) -> Sub msg
-
-port clientIdentifier : String -> Cmd msg
 
 --
 -- Update
@@ -260,20 +212,14 @@ update msg model =
         ( Idle, GotRandomBytes bytes ) ->
             gotRandomBytes model bytes
 
-        ( Authorized token, UserInfoRequested ) ->
-            userInfoRequested model token
-
         ( Authorized token, AccountPlayerInfoRequested) ->
             accountPlayerInfoRequested model token    
-
-        ( Authorized _, GotUserInfo userInfoResponse ) ->
-            gotUserInfo model userInfoResponse
 
         ( Authorized _, GotAccountPlayerInfo accountPlayerResponse) ->
             gotAccountPlayerInfo model accountPlayerResponse
 
         ( Done _, SignOutRequested ) ->
-            signOutRequested model
+                signOutRequested model
 
         _ ->
             noOp model
@@ -312,39 +258,14 @@ gotRandomBytes model bytes =
         |> Navigation.load
     )
 
-
-userInfoRequested : Model -> OAuth.Token -> ( Model, Cmd Msg )
-userInfoRequested model token =
-    ( { model | flow = Authorized token }
-    , getUserInfo configuration token
-    )
-
 accountPlayerInfoRequested : Model -> OAuth.Token -> (Model, Cmd Msg)
 accountPlayerInfoRequested model token = 
     ( {model | flow = Authorized token}
     , getAccountPlayers configuration token
     )
 
-
-gotUserInfo : Model -> Result Http.Error UserInfo -> ( Model, Cmd Msg )
-gotUserInfo model userInfoResponse =
-    case userInfoResponse of
-        Err _ ->
-            ( { model | flow = Errored ErrHTTPGetUserInfo }
-            , Cmd.none
-            )
-
-        Ok userInfo ->
-            ( { model | flow = Done userInfo }
-            , Cmd.none
-            )
-
 gotAccountPlayerInfo : Model -> Result Http.Error (List AccountPlayer) -> (Model, Cmd Msg)
 gotAccountPlayerInfo model accountPlayerResponse = 
-    let
-        _ = Debug.log "getPlayersResponse" accountPlayerResponse 
-        
-    in
     case accountPlayerResponse of 
         Err _ -> 
             (
@@ -352,7 +273,7 @@ gotAccountPlayerInfo model accountPlayerResponse =
                 , Cmd.none
             )
         Ok accountPlayer ->
-            ({ model | flow = GotPlayers accountPlayer }
+            ({ model | flow = Done accountPlayer }
             , Cmd.none
             )
 
@@ -390,8 +311,7 @@ viewBody config model =
             Idle ->
                 div [ class "flex" ]
                     [ viewAuthorizationStep False
-                    , viewStepSeparator False
-                    , viewGetUserInfoStep False
+                    , viewStepSeparator False      
                     ]
                     :: viewIdle config
 
@@ -399,19 +319,10 @@ viewBody config model =
                 div [ class "flex" ]
                     [ viewAuthorizationStep True
                     , viewStepSeparator True
-                    , viewGetUserInfoStep False
                     ]
                     :: viewAuthorized
 
-            Done userInfo ->
-                div [ class "flex" ]
-                    [ viewAuthorizationStep True
-                    , viewStepSeparator True
-                    , viewGetUserInfoStep True
-                    ]
-                    :: viewUserInfo config userInfo
-
-            GotPlayers accountPlayerInfo ->
+            Done accountPlayerInfo ->
                 div [ class "flex"]
                     [ viewAuthorizationStep True
                     , viewStepSeparator True 
@@ -437,20 +348,7 @@ viewIdle { btnClass } =
 
 viewAuthorized : List (Html Msg)
 viewAuthorized =
-    [ span [] [ text "Getting user info..." ]
-    ]
-
-
-viewUserInfo : ViewConfiguration Msg -> UserInfo -> List (Html Msg)
-viewUserInfo { btnClass } { name } =
-    [ div [ class "flex", class "flex-column" ]
-        [ p [] [ text name ]
-        , div []
-            [ button
-                [ onClick SignOutRequested, btnClass ]
-                [ text "Sign out" ]
-            ]
-        ]
+    [ span [] [ text "Getting info..." ]
     ]
 
 viewAccountPlayerInfo : ViewConfiguration Msg -> (List AccountPlayer) -> List (Html Msg)
@@ -482,9 +380,6 @@ viewError e =
             ErrAuthorization error ->
                 oauthErrorToString { error = error.error, errorDescription = error.errorDescription }
 
-            ErrHTTPGetUserInfo ->
-                "Unable to retrieve user info: HTTP request failed."
-
             ErrHTTPGetAccountPlayerInfo ->
                 "Unable to retrive account player info: HTTP request failed."
 
@@ -493,14 +388,9 @@ viewAuthorizationStep : Bool -> Html Msg
 viewAuthorizationStep isActive =
     viewStep isActive ( "Authorization", style "left" "-110%" )
 
-
-viewGetUserInfoStep : Bool -> Html Msg
-viewGetUserInfoStep isActive =
-    viewStep isActive ( "Get User Info", style "left" "-135%" )
-
 viewGetAccountPlayerInfoStep : Bool -> Html Msg 
 viewGetAccountPlayerInfoStep isActive = 
-    viewStep isActive ("Get Account Play Info", style "left" "-135%")
+    viewStep isActive ("Get Account Device Info", style "left" "-135%")
 
 
 viewErroredStep : Html Msg
@@ -538,49 +428,3 @@ viewStepSeparator isActive =
                    )
     in
     span stepClass []
-
-
-
---
--- Helpers
---
-
-boolToString : Bool -> String
-boolToString input = 
-    if input == True 
-        then "True"
-        else "False"
-
-toBytes : List Int -> Bytes
-toBytes =
-    List.map Bytes.unsignedInt8 >> Bytes.sequence >> Bytes.encode
-
-
-base64 : Bytes -> String
-base64 =
-    Base64.bytes >> Base64.encode
-
-
-convertBytes : List Int -> { state : String }
-convertBytes =
-    toBytes >> base64 >> (\state -> { state = state })
-
-
-oauthErrorToString : { error : OAuth.ErrorCode, errorDescription : Maybe String } -> String
-oauthErrorToString { error, errorDescription } =
-    let
-        desc =
-            errorDescription |> Maybe.withDefault "" |> String.replace "+" " "
-    in
-    OAuth.errorCodeToString error ++ ": " ++ desc
-
-
-defaultHttpsUrl : Url
-defaultHttpsUrl =
-    { protocol = Https
-    , host = ""
-    , path = ""
-    , port_ = Nothing
-    , query = Nothing
-    , fragment = Nothing
-    }
